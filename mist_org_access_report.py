@@ -6,8 +6,13 @@ GET /api/v1/self on that key's cloud and reports every privilege entry:
 org / site / orgsites / msp scope, org name + id, role (admin/write/read/
 helpdesk/installer...) and any limiting views.
 
+Keys with super access (scope=super) can see every org on the cloud. For
+those keys the script also lists every org via GET /api/v1/super/orgs and
+/api/v1/super/msps (paged, 1000 per call). Skip this with --no-super-orgs.
+
 Usage:
     python3 mist_org_access_report.py [--ini PATH] [--csv OUT.csv] [--xlsx [OUT.xlsx]]
+                                     [--super-csv OUT.csv] [--no-super-orgs]
 
 Exit code 0 = all keys answered, 1 = at least one key failed, 2 = bad ini.
 """
@@ -23,6 +28,7 @@ import requests
 DEFAULT_INI = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "mist_org_access_report.ini")
 RESERVED = {"account", "network"}
+PAGE_LIMIT = 1000
 ROLE_ORDER = {"admin": 0, "write": 1, "read": 2, "helpdesk": 3, "installer": 4}
 
 
@@ -57,6 +63,49 @@ def fetch_self(session, cloud, token):
     if resp.status_code != 200:
         return None, f"/self HTTP {resp.status_code}"
     return resp.json(), ""
+
+
+def fetch_paged(session, cloud, token, path):
+    """GET a page-numbered list endpoint until X-Page-Total is reached.
+
+    Returns (items, error)."""
+    items, page = [], 1
+    hdr = {"Authorization": f"Token {token}"}
+    while True:
+        try:
+            resp = session.get(f"https://{cloud}{path}",
+                               params={"limit": PAGE_LIMIT, "page": page},
+                               headers=hdr, timeout=300)
+        except requests.exceptions.RequestException as e:
+            return None, f"{path} {type(e).__name__}"
+        if resp.status_code != 200:
+            return None, f"{path} HTTP {resp.status_code}"
+        batch = resp.json()
+        items.extend(batch)
+        total = int(resp.headers.get("X-Page-Total", len(items)))
+        if not batch or len(batch) < PAGE_LIMIT or len(items) >= total:
+            return items, ""
+        page += 1
+
+
+def super_org_rows(key, cloud, role, orgs, msps, direct):
+    """One row per org a super key can see. direct = {org_id: role} from /self."""
+    msp_by_id = {m.get("id"): m for m in msps}
+    rows = []
+    for o in orgs:
+        msp = msp_by_id.get(o.get("msp_id")) or {}
+        created = o.get("created_time")
+        rows.append({
+            "key": key, "cloud": cloud, "role": role,
+            "name": o.get("name", ""), "id": o.get("id", ""),
+            "msp": msp.get("name", "") if o.get("msp_id") else "",
+            "msp_id": o.get("msp_id") or "",
+            "msp_tier": msp.get("tier", "") if o.get("msp_id") else "",
+            "created": datetime.fromtimestamp(created).strftime("%Y-%m-%d") if created else "",
+            "direct_role": direct.get(o.get("id"), ""),
+        })
+    rows.sort(key=lambda r: r["name"].lower())
+    return rows
 
 
 def privilege_rows(key, cloud, me):
@@ -96,9 +145,10 @@ def print_table(headers, rows):
         print("  " + "  ".join(v.ljust(w) for v, w in zip(r, widths)))
 
 
-def write_xlsx(path, ini, sections, summary, all_rows):
+def write_xlsx(path, ini, sections, summary, all_rows, super_rows):
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
     from openpyxl.utils import get_column_letter
 
     head_font = Font(bold=True, color="FFFFFF")
@@ -112,7 +162,8 @@ def write_xlsx(path, ini, sections, summary, all_rows):
             c.font, c.fill = head_font, head_fill
             c.alignment = Alignment(vertical="center")
         for r in rows:
-            ws.append(r)
+            ws.append([ILLEGAL_CHARACTERS_RE.sub("", v) if isinstance(v, str) else v
+                       for v in r])
         ws.freeze_panes = "A2"
         ws.auto_filter.ref = ws.dimensions
         for i, h in enumerate(headers, 1):
@@ -127,6 +178,9 @@ def write_xlsx(path, ini, sections, summary, all_rows):
     for r in all_rows:
         by_key.setdefault(r["key"], []).append(r)
     rows = []
+    super_count = {}
+    for r in super_rows:
+        super_count[r["key"]] = super_count.get(r["key"], 0) + 1
     for key, cloud, email, _orgs, _roles, result in summary:
         kr = by_key.get(key, [])
         orgs = len({r["org_id"] or r["id"] for r in kr if r["scope"] != "super"}) \
@@ -134,11 +188,14 @@ def write_xlsx(path, ini, sections, summary, all_rows):
         sup = ",".join(r["role"] for r in kr if r["scope"] == "super") or None
         counts = [sum(1 for r in kr if r["role"] == role) if result == "OK" else None
                   for role in roles]
-        rows.append([key, cloud, email if email != "-" else None, sup, orgs, *counts, result])
-    sheet(ws, ["Key", "Cloud", "User", "Super access", "Listed orgs", *[f"{r.capitalize()}" for r in roles], "Result"], rows)
+        sorgs = super_count.get(key) if sup and result == "OK" else None
+        rows.append([key, cloud, email if email != "-" else None, sup, orgs, sorgs,
+                     *counts, result])
+    sheet(ws, ["Key", "Cloud", "User", "Super access", "Listed orgs", "Super orgs",
+               *[f"{r.capitalize()}" for r in roles], "Result"], rows)
     total_row = len(rows) + 2
     ws.cell(total_row, 1, "Total").font = Font(bold=True)
-    for col in range(5, 6 + len(roles)):
+    for col in range(5, 7 + len(roles)):
         L = get_column_letter(col)
         ws.cell(total_row, col, f"=SUM({L}2:{L}{total_row - 1})").font = Font(bold=True)
     for row in ws.iter_rows(min_row=2, max_row=total_row - 1):
@@ -162,6 +219,17 @@ def write_xlsx(path, ini, sections, summary, all_rows):
         if color:
             row[5].fill = PatternFill("solid", fgColor=color)
 
+    if super_rows:
+        ws = wb.create_sheet("Super Orgs")
+        headers = ["Key", "Cloud", "Super role", "Org", "Org ID", "MSP", "MSP ID",
+                   "MSP tier", "Created", "Direct role"]
+        rows = [[r["key"], r["cloud"], r["role"], r["name"], r["id"], r["msp"] or None,
+                 r["msp_id"] or None, r["msp_tier"] or None, r["created"] or None,
+                 r["direct_role"] or None]
+                for r in sorted(super_rows, key=lambda r: (sections.index(r["key"]),
+                                                           r["name"].lower()))]
+        sheet(ws, headers, rows)
+
     wb.save(path)
 
 
@@ -172,6 +240,9 @@ def main():
     ap.add_argument("--xlsx", nargs="?", const="",
                     help="also write an Excel workbook (default name "
                          "mist_org_access_YYYYMMDD_HHMM.xlsx in the current folder)")
+    ap.add_argument("--super-csv", help="also write the super-key org list to this CSV file")
+    ap.add_argument("--no-super-orgs", action="store_true",
+                    help="do not list every org for keys with super access")
     args = ap.parse_args()
 
     cfg = configparser.ConfigParser()
@@ -185,7 +256,7 @@ def main():
         return 2
 
     session = build_session(cfg)
-    all_rows, summary, failed = [], [], []
+    all_rows, super_rows, summary, failed = [], [], [], []
     for s in sections:
         cloud, token = cfg[s]["cloud"].strip(), cfg[s]["token"].strip()
         me, err = fetch_self(session, cloud, token)
@@ -210,7 +281,27 @@ def main():
         orgs = len({r["org_id"] or r["id"] for r in rows if r["scope"] != "super"})
         sup = ",".join(r["role"] for r in rows if r["scope"] == "super")
         orgs_txt = f"{orgs} + all (super {sup})" if sup else str(orgs)
-        summary.append([s, cloud, me.get("email", "(org token)"), orgs_txt, role_txt or "-", "OK"])
+        email = me.get("email", "(org token)")
+
+        if sup and not args.no_super_orgs:
+            print(f"  Listing every org for super {sup} ...", end="", flush=True)
+            orgs_list, err = fetch_paged(session, cloud, token, "/api/v1/super/orgs")
+            msps, err2 = ([], "") if err else fetch_paged(session, cloud, token,
+                                                          "/api/v1/super/msps")
+            err = err or err2
+            if err:
+                print(f" FAILED: {err}")
+                failed.append(s)
+                summary.append([s, cloud, email, orgs_txt, role_txt or "-", f"FAIL: {err}"])
+                continue
+            direct = {r["org_id"]: r["role"] for r in rows if r["org_id"]}
+            srows = super_org_rows(s, cloud, sup, orgs_list, msps, direct)
+            super_rows.extend(srows)
+            in_msp = sum(1 for r in srows if r["msp_id"])
+            print(f" {len(srows)} orgs ({in_msp} in {len(msps)} MSPs)")
+            orgs_txt = f"{orgs} + {len(srows)} (super {sup})"
+
+        summary.append([s, cloud, email, orgs_txt, role_txt or "-", "OK"])
 
     print("\n=== Summary ===")
     print_table(["Key", "Cloud", "User", "Orgs", "Roles", "Result"], summary)
@@ -224,9 +315,20 @@ def main():
             w.writerows(all_rows)
         print(f"\nWrote {len(all_rows)} rows to {args.csv}")
 
+    if args.super_csv:
+        fields = ["key", "cloud", "role", "name", "id", "msp", "msp_id", "msp_tier",
+                  "created", "direct_role"]
+        with open(args.super_csv, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=fields)
+            w.writeheader()
+            w.writerows(super_rows)
+        print(f"\nWrote {len(super_rows)} super org rows to {args.super_csv}")
+
     if args.xlsx is not None:
         path = args.xlsx or f"mist_org_access_{datetime.now():%Y%m%d_%H%M}.xlsx"
-        write_xlsx(path, args.ini, sections, summary, all_rows)
+        print(f"\nWriting Excel workbook ({len(all_rows)} access rows, "
+              f"{len(super_rows)} super org rows) ...")
+        write_xlsx(path, args.ini, sections, summary, all_rows, super_rows)
         print(f"\nWrote Excel workbook {os.path.abspath(path)}")
 
     if failed:
