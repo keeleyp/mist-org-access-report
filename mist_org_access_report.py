@@ -8,11 +8,12 @@ helpdesk/installer...) and any limiting views.
 
 Keys with super access (scope=super) can see every org on the cloud. For
 those keys the script also lists every org via GET /api/v1/super/orgs and
-/api/v1/super/msps (paged, 1000 per call). Skip this with --no-super-orgs.
+/api/v1/super/msps (paged, 1000 per call). It shows the org counts and
+asks first; --super-orgs says yes and --no-super-orgs says no without asking.
 
 Usage:
     python3 mist_org_access_report.py [--ini PATH] [--csv OUT.csv] [--xlsx [OUT.xlsx]]
-                                     [--super-csv OUT.csv] [--no-super-orgs]
+                                     [--super-csv OUT.csv] [--super-orgs | --no-super-orgs]
 
 Exit code 0 = all keys answered, 1 = at least one key failed, 2 = bad ini.
 """
@@ -106,6 +107,53 @@ def super_org_rows(key, cloud, role, orgs, msps, direct):
         })
     rows.sort(key=lambda r: r["name"].lower())
     return rows
+
+
+def count_super_orgs(session, cloud, token):
+    """Org count a super key can see, from one limit=1 call. None if unknown."""
+    try:
+        resp = session.get(f"https://{cloud}/api/v1/super/orgs", params={"limit": 1},
+                           headers={"Authorization": f"Token {token}"}, timeout=60)
+    except requests.exceptions.RequestException:
+        return None
+    if resp.status_code != 200:
+        return None
+    total = resp.headers.get("X-Page-Total")
+    return int(total) if total and total.isdigit() else None
+
+
+def confirm_super(session, super_keys, args):
+    """Ask before listing every org for super keys. Returns True to go ahead."""
+    if args.no_super_orgs:
+        return False
+    print(f"\n=== Super access ===")
+    print(f"  {len(super_keys)} key(s) have super access and can see every org on their cloud:")
+    grand, calls = 0, 0
+    for _idx, s, cloud, token, sup, _direct, _orgs in super_keys:
+        n = count_super_orgs(session, cloud, token)
+        if n is None:
+            print(f"    {s:<12} {cloud:<20} super {sup:<6} org count unknown")
+            calls += 2
+        else:
+            print(f"    {s:<12} {cloud:<20} super {sup:<6} {n:>8,} orgs")
+            grand += n
+            calls += -(-n // PAGE_LIMIT) + 1
+    print(f"  Total: {grand:,} orgs, about {calls} API calls.")
+    if args.super_orgs:
+        print("  --super-orgs given: listing every org.")
+        return True
+    if not sys.stdin.isatty():
+        print("  Not running interactively, so skipping the org list "
+              "(use --super-orgs to include it).")
+        return False
+    try:
+        ans = input("  List every org for these keys (Super Orgs sheet / --super-csv)? [y/N] ")
+    except EOFError:
+        ans = ""
+    if ans.strip().lower() in ("y", "yes"):
+        return True
+    print("  Skipped - super access is reported as one row per key.")
+    return False
 
 
 def privilege_rows(key, cloud, me):
@@ -241,8 +289,11 @@ def main():
                     help="also write an Excel workbook (default name "
                          "mist_org_access_YYYYMMDD_HHMM.xlsx in the current folder)")
     ap.add_argument("--super-csv", help="also write the super-key org list to this CSV file")
-    ap.add_argument("--no-super-orgs", action="store_true",
-                    help="do not list every org for keys with super access")
+    grp = ap.add_mutually_exclusive_group()
+    grp.add_argument("--super-orgs", action="store_true",
+                     help="list every org for super keys without asking")
+    grp.add_argument("--no-super-orgs", action="store_true",
+                     help="do not list every org for super keys, and do not ask")
     args = ap.parse_args()
 
     cfg = configparser.ConfigParser()
@@ -257,6 +308,7 @@ def main():
 
     session = build_session(cfg)
     all_rows, super_rows, summary, failed = [], [], [], []
+    super_keys = []  # (summary index, key, cloud, token, role, direct, orgs)
     for s in sections:
         cloud, token = cfg[s]["cloud"].strip(), cfg[s]["token"].strip()
         me, err = fetch_self(session, cloud, token)
@@ -281,10 +333,15 @@ def main():
         orgs = len({r["org_id"] or r["id"] for r in rows if r["scope"] != "super"})
         sup = ",".join(r["role"] for r in rows if r["scope"] == "super")
         orgs_txt = f"{orgs} + all (super {sup})" if sup else str(orgs)
-        email = me.get("email", "(org token)")
+        if sup:
+            direct = {r["org_id"]: r["role"] for r in rows if r["org_id"]}
+            super_keys.append((len(summary), s, cloud, token, sup, direct, orgs))
+        summary.append([s, cloud, me.get("email", "(org token)"), orgs_txt,
+                        role_txt or "-", "OK"])
 
-        if sup and not args.no_super_orgs:
-            print(f"  Listing every org for super {sup} ...", end="", flush=True)
+    if super_keys and confirm_super(session, super_keys, args):
+        for idx, s, cloud, token, sup, direct, orgs in super_keys:
+            print(f"  {s}: listing every org for super {sup} ...", end="", flush=True)
             orgs_list, err = fetch_paged(session, cloud, token, "/api/v1/super/orgs")
             msps, err2 = ([], "") if err else fetch_paged(session, cloud, token,
                                                           "/api/v1/super/msps")
@@ -292,16 +349,13 @@ def main():
             if err:
                 print(f" FAILED: {err}")
                 failed.append(s)
-                summary.append([s, cloud, email, orgs_txt, role_txt or "-", f"FAIL: {err}"])
+                summary[idx][5] = f"FAIL: {err}"
                 continue
-            direct = {r["org_id"]: r["role"] for r in rows if r["org_id"]}
             srows = super_org_rows(s, cloud, sup, orgs_list, msps, direct)
             super_rows.extend(srows)
             in_msp = sum(1 for r in srows if r["msp_id"])
             print(f" {len(srows)} orgs ({in_msp} in {len(msps)} MSPs)")
-            orgs_txt = f"{orgs} + {len(srows)} (super {sup})"
-
-        summary.append([s, cloud, email, orgs_txt, role_txt or "-", "OK"])
+            summary[idx][3] = f"{orgs} + {len(srows)} (super {sup})"
 
     print("\n=== Summary ===")
     print_table(["Key", "Cloud", "User", "Orgs", "Roles", "Result"], summary)

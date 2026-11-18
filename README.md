@@ -16,7 +16,24 @@ Super accounts are supported. A `super` privilege gives access to every org on t
 - One row per org, with org name and ID, MSP, MSP tier, created date, and the key's own direct role on that org, if it has one
 - These rows go on a **Super Orgs** sheet in the workbook (`--xlsx`) or to `--super-csv`. The console just shows the count for each key.
 
-The script is read-only. It makes one API call per key, plus about one call per 1,000 orgs for super keys. A full run across all 12 clouds with super keys lists about 94,000 orgs in under a minute. Add `--no-super-orgs` to skip the listing.
+The script is read-only. It makes one API call per key, plus about one call per 1,000 orgs for super keys. A full run across all 12 clouds with super keys lists about 94,000 orgs in under a minute.
+
+**The script asks before listing the super orgs.** Once every key has been checked, it shows how many orgs each super key can see and roughly how many API calls the listing will take, then asks for confirmation:
+
+```
+=== Super access ===
+  12 key(s) have super access and can see every org on their cloud:
+    Global_01    api.mist.com         super read     27,094 orgs
+    EMEA_01      api.eu.mist.com      super read     13,407 orgs
+    ...
+  Total: 94,267 orgs, about 112 API calls.
+  List every org for these keys (Super Orgs sheet / --super-csv)? [y/N]
+```
+
+- Enter `y` to fetch the list. Anything else skips it, and super access is then reported as one row per key.
+- `--super-orgs` says yes without asking, and `--no-super-orgs` says no without asking. Either one suits scheduled or scripted runs.
+- When the script isn't run from a terminal and neither flag is given, it skips the list.
+- If no key has super access, nothing is asked and the workbook has no Super Orgs sheet.
 
 ## Setup
 
@@ -62,7 +79,8 @@ python3 mist_org_access_report.py
 | `--xlsx [OUT.xlsx]` | Also write an Excel workbook. With no name it saves `mist_org_access_YYYYMMDD_HHMM.xlsx` in the current folder. |
 | `--csv OUT.csv` | Also write every privilege row to a CSV file. |
 | `--super-csv OUT.csv` | Also write the super-key org list to a CSV file. |
-| `--no-super-orgs` | Don't list every org for super keys; only report the super privilege itself. |
+| `--super-orgs` | List every org for super keys without asking. |
+| `--no-super-orgs` | Don't list every org for super keys, and don't ask. Only the super privilege itself is reported. |
 
 Example:
 
@@ -83,7 +101,6 @@ There is one table per key, with admin rows first, then write, then read:
   admin  org       Demo Org                     1d01a82a-…  -            -
   write  orgsites  Customer Org                 c23eeb51-…  -            org_network_admin
   read   super     (all orgs on cloud - super)              -            -
-  Listing every org for super read ... 2644 orgs (221 in 34 MSPs)
 ```
 
 After that comes a summary with one line per key:
