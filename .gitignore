@@ -1,0 +1,7 @@
+*.ini
+!mist_org_access_report.ini.example
+*.xlsx
+*.csv
+~$*
+__pycache__/
+.DS_Store

@@ -1,0 +1,69 @@
+# Mist Org Access Report - API key file.
+# Copy to mist_org_access_report.ini and paste an API token into each
+# section you want to check. Sections with an empty token are skipped,
+# so leave unused clouds blank (or delete them).
+#
+#   cloud = Mist API host (api.mist.com for US, else api.<cloud>.mist.com)
+#   token = API token (user token or org token)
+#
+# Section names are just labels - rename them, and add more sections for
+# several keys on the same cloud (e.g. [EMEA_01_second_key]).
+# [account] and [network] are reserved and hold no tokens.
+
+[account]
+user = you@example.com
+
+[network]
+# Optional - only needed behind Zscaler / a proxy.
+# ca_bundle = /path/to/zscaler-root.pem
+# verify_ssl = true
+# http_proxy = http://proxy:8080
+# https_proxy = http://proxy:8080
+
+[Global_01]
+cloud = api.mist.com
+token =
+
+[Global_02]
+cloud = api.gc1.mist.com
+token =
+
+[Global_03]
+cloud = api.ac2.mist.com
+token =
+
+[Global_04]
+cloud = api.gc2.mist.com
+token =
+
+[Global_05]
+cloud = api.gc4.mist.com
+token =
+
+[EMEA_01]
+cloud = api.eu.mist.com
+token =
+
+[EMEA_02]
+cloud = api.gc3.mist.com
+token =
+
+[EMEA_03]
+cloud = api.ac6.mist.com
+token =
+
+[EMEA_04]
+cloud = api.gc6.mist.com
+token =
+
+[APAC_01]
+cloud = api.ac5.mist.com
+token =
+
+[APAC_02]
+cloud = api.gc5.mist.com
+token =
+
+[APAC_03]
+cloud = api.gc7.mist.com
+token =
